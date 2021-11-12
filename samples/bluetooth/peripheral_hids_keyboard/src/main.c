@@ -975,6 +975,7 @@ void main(void)
 #else
 	advertising_start();
 #endif
+	// good example to enable ble
 
 	k_work_init(&pairing_work, pairing_process);
 

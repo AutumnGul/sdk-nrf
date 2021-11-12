@@ -14,10 +14,20 @@
 #include <mpsl_timeslot.h>
 #include <mpsl.h>
 #include <hal/nrf_timer.h>
+#include <dk_buttons_and_leds.h>
+#include <drivers/gpio.h>
 
-#define TIMESLOT_REQUEST_DISTANCE_US (1000000)
-#define TIMESLOT_LENGTH_US           (200)
-#define TIMER_EXPIRY_US (TIMESLOT_LENGTH_US - 50)
+
+#include <bluetooth/bluetooth.h>
+#include <bluetooth/hci.h>
+#include <bluetooth/conn.h>
+#include <bluetooth/uuid.h>
+#include <bluetooth/gatt.h>
+#include <settings/settings.h>
+
+#define TIMESLOT_REQUEST_DISTANCE_US (2000000)
+#define TIMESLOT_LENGTH_US           (20000)
+#define TIMER_EXPIRY_US (10000)
 
 #define MPSL_THREAD_PRIO             CONFIG_MPSL_THREAD_COOP_PRIO
 #define STACKSIZE                    CONFIG_MAIN_STACK_SIZE
@@ -31,6 +41,19 @@ enum mpsl_timeslot_call {
 	MAKE_REQUEST,
 	CLOSE_SESSION,
 };
+
+/* Adv set up */
+static uint8_t mfg_data[] = { 0xff, 0xff, 0x00 };
+
+static const struct bt_data ad[] = {
+	BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg_data, 3),
+};
+
+struct bt_le_adv_param *adv_param = BT_LE_ADV_PARAM(
+					BT_LE_ADV_OPT_USE_NAME,
+					BT_GAP_ADV_SLOW_INT_MIN,
+					BT_GAP_ADV_SLOW_INT_MAX,
+					NULL);
 
 /* Timeslot requests */
 static mpsl_timeslot_request_t timeslot_request_earliest = {
@@ -65,6 +88,45 @@ static void error(void)
 	}
 }
 
+static void StatusLedOn(void)
+{
+	dk_set_led_on(DK_LED1);
+	dk_set_led_on(DK_LED2);
+	dk_set_led_on(DK_LED3);
+	dk_set_led_on(DK_LED4);
+}
+
+static void StatusLedOff(void)
+{
+	dk_set_led_off(DK_LED1);
+	dk_set_led_off(DK_LED2);
+	dk_set_led_off(DK_LED3);
+	dk_set_led_off(DK_LED4);
+}
+
+#define PIN_YELLOW	 3
+#define PIN_BLUE	 4
+static const struct device *dev;
+
+static void configure_gpio(void)
+{
+	int err;
+
+	err = dk_leds_init();
+	if (err) {
+		printk("Cannot init LEDs (err: %d)\n", err);
+	}
+
+	/* Debug GPIO*/
+	dev = device_get_binding("GPIO_1");
+	gpio_pin_configure(dev, PIN_YELLOW, GPIO_OUTPUT);
+	gpio_pin_configure(dev, PIN_BLUE, GPIO_OUTPUT);
+
+	gpio_pin_set(dev, PIN_BLUE, 0);
+	gpio_pin_set(dev, PIN_YELLOW, 0);
+
+}
+
 static mpsl_timeslot_signal_return_param_t *mpsl_timeslot_callback(
 	mpsl_timeslot_session_id_t session_id,
 	uint32_t signal_type)
@@ -72,10 +134,15 @@ static mpsl_timeslot_signal_return_param_t *mpsl_timeslot_callback(
 	(void) session_id; /* unused parameter */
 
 	mpsl_timeslot_signal_return_param_t *p_ret_val = NULL;
+		signal_callback_return_param.callback_action =
+			MPSL_TIMESLOT_SIGNAL_ACTION_NONE;
+		p_ret_val = &signal_callback_return_param;
 
 	switch (signal_type) {
 
 	case MPSL_TIMESLOT_SIGNAL_START:
+        StatusLedOn();
+		gpio_pin_set(dev, PIN_BLUE, 1);
 		/* No return action */
 		signal_callback_return_param.callback_action =
 			MPSL_TIMESLOT_SIGNAL_ACTION_NONE;
@@ -84,16 +151,27 @@ static mpsl_timeslot_signal_return_param_t *mpsl_timeslot_callback(
 		/* Setup timer to trigger an interrupt (and thus the TIMER0
 		 * signal) before timeslot end.
 		 */
+		NRF_TIMER0->TASKS_STOP=1;
+		NRF_TIMER0->TASKS_CLEAR=1;
+
 		nrf_timer_cc_set(NRF_TIMER0, NRF_TIMER_CC_CHANNEL0,
 			TIMER_EXPIRY_US);
 		nrf_timer_int_enable(NRF_TIMER0, NRF_TIMER_INT_COMPARE0_MASK);
 
+		NRF_TIMER0->TASKS_START=1;
+
+		gpio_pin_set(dev, PIN_YELLOW, 1);
 		break;
 	case MPSL_TIMESLOT_SIGNAL_TIMER0:
+		NRF_TIMER0->TASKS_STOP=1;
+        StatusLedOff();
 
 		/* Clear event */
+		gpio_pin_set(dev, PIN_BLUE, 0);
 		nrf_timer_int_disable(NRF_TIMER0, NRF_TIMER_INT_COMPARE0_MASK);
 		nrf_timer_event_clear(NRF_TIMER0, NRF_TIMER_EVENT_COMPARE0);
+		NRF_TIMER0->TASKS_STOP=1;
+		gpio_pin_set(dev, PIN_YELLOW, 0);
 
 		if (request_in_cb) {
 			/* Request new timeslot when callback returns */
@@ -110,6 +188,10 @@ static mpsl_timeslot_signal_return_param_t *mpsl_timeslot_callback(
 		p_ret_val = &signal_callback_return_param;
 
 		break;
+    case MPSL_TIMESLOT_SIGNAL_BLOCKED:
+    case MPSL_TIMESLOT_SIGNAL_CANCELLED:
+        break;
+
 	case MPSL_TIMESLOT_SIGNAL_SESSION_IDLE:
 		break;
 	case MPSL_TIMESLOT_SIGNAL_SESSION_CLOSED:
@@ -120,36 +202,17 @@ static mpsl_timeslot_signal_return_param_t *mpsl_timeslot_callback(
 		break;
 	}
 
-	/* Put callback info in the message queue. */
-	int err = k_msgq_put(&callback_msgq, &signal_type, K_NO_WAIT);
-
-	if (err) {
-		error();
-	}
-
 	return p_ret_val;
 }
 
 static void mpsl_timeslot_demo(void)
 {
 	int err;
-	char input_char;
 	enum mpsl_timeslot_call api_call;
 
 	printk("-----------------------------------------------------\n");
-	printk("Press a key to open session and request timeslots:\n");
-	printk("* 'a' for a session where each timeslot makes a new request\n");
-	printk("* 'b' for a session with a single timeslot request\n");
-	input_char = console_getchar();
-	printk("%c\n", input_char);
 
-	if (input_char == 'a') {
-		request_in_cb = true;
-	} else if (input_char == 'b') {
-		request_in_cb = false;
-	} else {
-		return;
-	}
+	request_in_cb = true;
 
 	api_call = OPEN_SESSION;
 	err = k_msgq_put(&mpsl_api_msgq, &api_call, K_FOREVER);
@@ -163,8 +226,8 @@ static void mpsl_timeslot_demo(void)
 		error();
 	}
 
-	printk("Press any key to close the session.\n");
-	console_getchar();
+
+	k_sleep(K_MSEC(10000));
 
 	api_call = CLOSE_SESSION;
 	err = k_msgq_put(&mpsl_api_msgq, &api_call, K_FOREVER);
@@ -247,15 +310,24 @@ static void console_print_thread(void)
 
 void main(void)
 {
-
-	int err = console_init();
-
-	if (err) {
-		error();
-	}
+	int err;
 
 	printk("-----------------------------------------------------\n");
 	printk("             Nordic MPSL Timeslot sample\n");
+
+	// err = bt_enable(NULL);
+	// if (err) {
+	// 	printk("Bluetooth init failed (err %d)\n", err);
+	// 	return;
+	// }
+
+	// err = bt_le_adv_start(adv_param, ad, ARRAY_SIZE(ad), NULL, 0);
+
+	configure_gpio();
+
+	StatusLedOn();
+	k_sleep(K_MSEC(1000));
+	StatusLedOff();
 
 	while (1) {
 		mpsl_timeslot_demo();
