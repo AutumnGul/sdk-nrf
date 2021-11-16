@@ -58,14 +58,14 @@ struct bt_le_adv_param *adv_param = BT_LE_ADV_PARAM(
 /* Timeslot requests */
 static mpsl_timeslot_request_t timeslot_request_earliest = {
 	.request_type = MPSL_TIMESLOT_REQ_TYPE_EARLIEST,
-	.params.earliest.hfclk = MPSL_TIMESLOT_HFCLK_CFG_NO_GUARANTEE,
+	.params.earliest.hfclk = MPSL_TIMESLOT_HFCLK_CFG_XTAL_GUARANTEED,
 	.params.earliest.priority = MPSL_TIMESLOT_PRIORITY_NORMAL,
 	.params.earliest.length_us = TIMESLOT_LENGTH_US,
 	.params.earliest.timeout_us = 1000000
 };
 static mpsl_timeslot_request_t timeslot_request_normal = {
 	.request_type = MPSL_TIMESLOT_REQ_TYPE_NORMAL,
-	.params.normal.hfclk = MPSL_TIMESLOT_HFCLK_CFG_NO_GUARANTEE,
+	.params.normal.hfclk = MPSL_TIMESLOT_HFCLK_CFG_XTAL_GUARANTEED,
 	.params.normal.priority = MPSL_TIMESLOT_PRIORITY_NORMAL,
 	.params.normal.distance_us = TIMESLOT_REQUEST_DISTANCE_US,
 	.params.normal.length_us = TIMESLOT_LENGTH_US
